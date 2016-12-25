@@ -6,34 +6,90 @@ import time
 import traceback
 
 
-class PyHttpRespons:
-    def __init__(self):
-        pass
-
-
 class PyHttpRequest:
     def __init__(self):
-        self.rx = []
+        self.head_rx = ''
+        self.body_rx = ''
+        self.methord = None
+        self.query_string = None
+        self.http_version = None
+        self.request_head_done = False
 
-    def on_recv(self, data):
-        pass
+    def on_read(self, data):
+        # put data into head while head not done.
+        if self.request_head_done is False:
+            self.head_rx = self.head_rx + data
+        else:
+            self.body_rx = self.body_rx + data
 
+        if self.request_head_done is False:
+            delimiter_index = self.head_rx.find('\r\n\r\n')
+            if delimiter_index > 0:
+                self.head_rx = self.head_rx[:delimiter_index]
+                self.body_rx = self.head_rx[delimiter_index+4:]
+                self.request_head_done = True
+
+        if self.request_head_done and self.methord is None:
+            self.head_rx = self.head_rx.replace('\r', '')
+            self.head_rx = self.head_rx.split('\n')
+            first_line = self.head_rx[0]
+            first_line = first_line.split(' ')
+            if len(first_line) != 3:
+                return True
+            self.methord = first_line[0]
+            self.query_string = first_line[1]
+            self.http_version = first_line[2]
+            print self.methord, self.query_string, self.http_version
+            return True
+
+        return False
+
+    '''
+        test is request head recieved done
+    '''
     def is_request_ok(self):
+        if self.methord is None:
+            return False
+        if self.query_string is None:
+            return False
+        if self.http_version is None:
+            return False
+        return self.request_head_done
+
+
+class PyHttpResponds:
+    def __init__(self, request):
+        self.request = None
+
+    def on_write(self):
+        return None
+
+    def is_need_write(self):
         return False
 
 
 class PyHttpClient:
-    def __init__(self, fds, addr):
+    def __init__(self, fds, address):
         self.fds = fds
-        self.addr = addr
+        self.address = address
         self.born = time.time()
         self.request = None
-        self.respons = None
+        self.responds = None
 
+    '''
+        @brief test is client need read data in.
+        @retval False there is no any need.
+        @retval True need read data in.
+    '''
     def is_need_read(self):
         # always need read to detect connection close.
         return True
 
+    '''
+        @brief test is client need write data out.
+        @retval False there is no any need.
+        @retval True need write data out.
+    '''
     def is_need_write(self):
         if self.request is None:
             return False
@@ -41,36 +97,71 @@ class PyHttpClient:
         if self.request.is_request_ok() is False:
             return False
 
-        if self.respons is None:
+        if self.responds is None:
             return False
 
-        return self.respons.is_need_write()
+        return self.responds.is_need_write()
 
+    '''
+        @brief read data in through connected socket
+        @retval True read procedure complete, need close socket.
+        @retval False read procedure not complete
+    '''
     def on_read(self):
         try:
             data = self.fds.recv(1024)
         except Exception, e:
             print e
             traceback.format_exc()
-            return False
+            return True
 
         if self.request is None:
             self.request = PyHttpRequest()
-        else:
-            self.request.on_recv(data)
 
-        return True
+        return self.request.on_read(data)
 
+    '''
+        @brief write data out through connected socket
+        @retval True write procedure complete, need close socket.
+        @retval False write procedure not complete
+    '''
     def on_write(self):
-        pass
+        if self.request is None:
+            return False
 
+        if self.respons is None:
+            # initialize responds object flow request
+            self.responds = PyHttpResponds(self.request)
+
+        data = self.responds.on_write()
+        if data is None:
+            return False
+
+        try:
+            self.fds.send(data)
+        except Exception, e:
+            print e
+            traceback.format_exc()
+            return True
+
+        return False
+
+    '''
+        @brief event of client destroy will come to here.
+    '''
     def on_close(self):
         pass
 
+    '''
+        @brief you can do client business here
+        @retval business complete, need close socket.
+        @retval False business not complete
+    '''
     def on_rolling(self):
         # connection will timeout if no data recieved in 30s.
-        if self.request is None and time.time() - self.born > 30.0:
-            return False
+        if self.request is None and time.time() - self.born > 5.0:
+            return True
+        return False
 
 
 '''
@@ -95,6 +186,7 @@ class PyHttpd:
     def start(self):
         self.fds = socket.socket()
         try:
+            self.fds.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.fds.bind((self.server_address, self.server_port))
         except Exception, e:
             print e
