@@ -1,0 +1,8 @@
+# -*- coding: UTF-8 -*-
+__author__ = 'lijie'
+import PyHttpd
+
+httpd = PyHttpd.PyHttpd()
+httpd.start()
+while True:
+    httpd.run_server_step()
