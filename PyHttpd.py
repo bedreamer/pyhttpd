@@ -6,6 +6,23 @@ import time
 import traceback
 
 
+class PyHttpRule:
+    def __init__(self, path=None, methord=None):
+        if path is None:
+            path = '/'
+        if methord is None:
+            methord = [ 'GET' ]
+
+        self.path = self.path = path
+        self.methord = methord
+
+    def on_rolling(self, request):
+        return False
+
+
+'''
+    @brief parser http request
+'''
 class PyHttpRequest:
     def __init__(self):
         self.head_rx = ''
@@ -15,6 +32,11 @@ class PyHttpRequest:
         self.http_version = None
         self.request_head_done = False
 
+    '''
+        @brief parser httpd request
+
+        just push data into parser buffer.
+    '''
     def on_read(self, data):
         # put data into head while head not done.
         if self.request_head_done is False:
@@ -40,12 +62,12 @@ class PyHttpRequest:
             self.query_string = first_line[1]
             self.http_version = first_line[2]
             print self.methord, self.query_string, self.http_version
-            return True
+            return False
 
         return False
 
     '''
-        test is request head recieved done
+        @brief test is request head recieved done
     '''
     def is_request_ok(self):
         if self.methord is None:
@@ -54,27 +76,101 @@ class PyHttpRequest:
             return False
         if self.http_version is None:
             return False
+
         return self.request_head_done
 
 
+'''
+    pair of request.
+'''
 class PyHttpResponds:
     def __init__(self, request):
         self.request = None
 
+    '''
+        @brief write data out
+    '''
     def on_write(self):
         return None
 
+    '''
+        @brief test is responds writable.
+    '''
     def is_need_write(self):
         return False
 
+    '''
+        @brief test is rolling complete
+    '''
+    def is_rolling_done(self):
+        return False
 
+    '''
+        @brief rolling responds
+        @retval False need rolling continue
+        @retval True rolling done, could close connection now.
+    '''
+    def on_rolling(self):
+        return self.is_rolling_done()
+
+
+class PyHttpErrorResponds:
+    def __init__(self, request, code):
+        self.request = None
+        self.tx = 'HTTP/1.1 404 Not Found\r\n'
+        self.tx = self.tx + 'Date: %s\r\n' % time.strftime('%F %T')
+        self.tx = self.tx + 'Connection: keep-alive\r\n'
+        self.tx = self.tx + '\r\n'
+        self.tx = self.tx + '<html><title>404</title><body>not found!</body></html>'
+
+    '''
+        @brief write data out
+    '''
+    def on_write(self):
+        if self.tx is not None:
+            tx = self.tx
+            self.tx = None
+            return tx
+        return None
+
+    '''
+        @brief test is responds writable.
+    '''
+    def is_need_write(self):
+        if self.tx is not None:
+            return True
+        else:
+            return False
+
+    '''
+        @brief test is rolling complete
+    '''
+    def is_rolling_done(self):
+        if self.tx is not None:
+            return False
+        else:
+            return True
+
+    '''
+        @brief rolling responds
+        @retval False need rolling continue
+        @retval True rolling done, could close connection now.
+    '''
+    def on_rolling(self):
+        return self.is_rolling_done()
+
+
+'''
+    @brief http client object.
+'''
 class PyHttpClient:
-    def __init__(self, fds, address):
+    def __init__(self, server, fds, address):
         self.fds = fds
         self.address = address
         self.born = time.time()
         self.request = None
         self.responds = None
+        self.server = server
 
     '''
         @brief test is client need read data in.
@@ -115,6 +211,9 @@ class PyHttpClient:
             traceback.format_exc()
             return True
 
+        if data is None or len(data) <= 0:
+            return True
+
         if self.request is None:
             self.request = PyHttpRequest()
 
@@ -129,7 +228,7 @@ class PyHttpClient:
         if self.request is None:
             return False
 
-        if self.respons is None:
+        if self.responds is None:
             # initialize responds object flow request
             self.responds = PyHttpResponds(self.request)
 
@@ -159,9 +258,27 @@ class PyHttpClient:
     '''
     def on_rolling(self):
         # connection will timeout if no data recieved in 30s.
-        if self.request is None and time.time() - self.born > 5.0:
-            return True
-        return False
+        if self.request is None:
+            if time.time() - self.born > 5.0:
+                return True
+            else:
+                return False
+
+        #if self.responds is None and self.request.is_request_ok() is True:
+        #    self.responds = PyHttpResponds(self.request)
+
+        if self.request.is_request_ok() is True:
+            rule = self.server.match_rules(self)
+            if rule is None and self.responds is None:
+                self.responds = PyHttpErrorResponds(self.request, 404)
+            elif self.responds is None and self.request.is_request_ok() is True:
+                self.responds = PyHttpResponds(self.request)
+            else:
+                pass
+
+            return self.responds.on_rolling()
+        else:
+            return False
 
 
 '''
@@ -180,6 +297,23 @@ class PyHttpd:
         self.server_address = server_address
         self.server_port = server_port
 
+        # routing rules.
+        self.rules = []
+
+    def match_rules(self, request):
+        return None
+
+    '''
+        @brief routing path
+    '''
+    def route(self, path, methord=None):
+        if methord is None:
+            methord = ['GET']
+
+        rule = PyHttpRule(path, methord)
+        self.rules.append(rule)
+        return rule.on_rolling
+
     '''
         @brief start the http server
     '''
@@ -197,6 +331,7 @@ class PyHttpd:
         self.route = []
 
     '''
+        @brief run single step of select call.
     '''
     def run_server_step(self, time_to_wait=None):
         if time_to_wait is None:
@@ -250,7 +385,7 @@ class PyHttpd:
                 traceback.format_exc()
                 return False
 
-            client = PyHttpClient(conn, addr)
+            client = PyHttpClient(self, conn, addr)
             self.clients.append(client)
 
         return True

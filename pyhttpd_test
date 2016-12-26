@@ -3,6 +3,13 @@ __author__ = 'lijie'
 import PyHttpd
 
 httpd = PyHttpd.PyHttpd()
+
+
+@httpd.route('/', methord=['GET', 'POST'])
+def route_root(request):
+    print 'route_root'
+
+
 httpd.start()
 while True:
     httpd.run_server_step()
