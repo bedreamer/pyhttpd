@@ -1,391 +1,240 @@
-# -*- coding: UTF-8 -*-
-__author__ = 'lijie'
+# -*- coding: utf8 -*-
+from gevent import monkey
+monkey.patch_socket()
+import gevent
 import socket
-import select
-import time
-import traceback
+import re
+import urlparse
+import os
+import mimetypes
+import re
 
 
-class PyHttpRule:
-    def __init__(self, path=None, methord=None):
-        if path is None:
-            path = '/'
-        if methord is None:
-            methord = [ 'GET' ]
-
-        self.path = self.path = path
-        self.methord = methord
-
-    def on_rolling(self, request):
-        return False
-
-
-'''
-    @brief parser http request
-'''
-class PyHttpRequest:
-    def __init__(self):
-        self.head_rx = ''
-        self.body_rx = ''
-        self.methord = None
-        self.query_string = None
-        self.http_version = None
-        self.request_head_done = False
-
+def parser_http_headers(header_text):
     '''
-        @brief parser httpd request
-
-        just push data into parser buffer.
+     @:brief 解析http请求头部
+     @:return 请求字典
     '''
-    def on_read(self, data):
-        # put data into head while head not done.
-        if self.request_head_done is False:
-            self.head_rx = self.head_rx + data
-        else:
-            self.body_rx = self.body_rx + data
-
-        if self.request_head_done is False:
-            delimiter_index = self.head_rx.find('\r\n\r\n')
-            if delimiter_index > 0:
-                self.head_rx = self.head_rx[:delimiter_index]
-                self.body_rx = self.head_rx[delimiter_index+4:]
-                self.request_head_done = True
-
-        if self.request_head_done and self.methord is None:
-            self.head_rx = self.head_rx.replace('\r', '')
-            self.head_rx = self.head_rx.split('\n')
-            first_line = self.head_rx[0]
-            first_line = first_line.split(' ')
-            if len(first_line) != 3:
-                return True
-            self.methord = first_line[0]
-            self.query_string = first_line[1]
-            self.http_version = first_line[2]
-            print self.methord, self.query_string, self.http_version
-            return False
-
-        return False
-
-    '''
-        @brief test is request head recieved done
-    '''
-    def is_request_ok(self):
-        if self.methord is None:
-            return False
-        if self.query_string is None:
-            return False
-        if self.http_version is None:
-            return False
-
-        return self.request_head_done
-
-
-'''
-    pair of request.
-'''
-class PyHttpResponds:
-    def __init__(self, request):
-        self.request = None
-
-    '''
-        @brief write data out
-    '''
-    def on_write(self):
+    reg = re.compile('(?P<method>\S*)\s+(?P<full_query_string>\S*)\s+(?P<version>\S*)')
+    header_dict_result = reg.match(header_text)
+    if header_dict_result is None:
         return None
 
-    '''
-        @brief test is responds writable.
-    '''
-    def is_need_write(self):
-        return False
+    header_dict = header_dict_result.groupdict()
+    parser_result = urlparse.urlparse(header_dict['full_query_string'])
+    header_dict['path'] = parser_result.path
+    header_dict['query_string'] = parser_result.query
+    query = dict([(k, v[0]) for k, v in urlparse.parse_qs(parser_result.query).items()])
+    header_dict['query'] = query
 
-    '''
-        @brief test is rolling complete
-    '''
-    def is_rolling_done(self):
-        return False
-
-    '''
-        @brief rolling responds
-        @retval False need rolling continue
-        @retval True rolling done, could close connection now.
-    '''
-    def on_rolling(self):
-        return self.is_rolling_done()
-
-
-class PyHttpErrorResponds:
-    def __init__(self, request, code):
-        self.request = None
-        self.tx = 'HTTP/1.1 404 Not Found\r\n'
-        self.tx = self.tx + 'Date: %s\r\n' % time.strftime('%F %T')
-        self.tx = self.tx + 'Connection: keep-alive\r\n'
-        self.tx = self.tx + '\r\n'
-        self.tx = self.tx + '<html><title>404</title><body>not found!</body></html>'
-
-    '''
-        @brief write data out
-    '''
-    def on_write(self):
-        if self.tx is not None:
-            tx = self.tx
-            self.tx = None
-            return tx
-        return None
-
-    '''
-        @brief test is responds writable.
-    '''
-    def is_need_write(self):
-        if self.tx is not None:
-            return True
-        else:
-            return False
-
-    '''
-        @brief test is rolling complete
-    '''
-    def is_rolling_done(self):
-        if self.tx is not None:
-            return False
-        else:
-            return True
-
-    '''
-        @brief rolling responds
-        @retval False need rolling continue
-        @retval True rolling done, could close connection now.
-    '''
-    def on_rolling(self):
-        return self.is_rolling_done()
-
-
-'''
-    @brief http client object.
-'''
-class PyHttpClient:
-    def __init__(self, server, fds, address):
-        self.fds = fds
-        self.address = address
-        self.born = time.time()
-        self.request = None
-        self.responds = None
-        self.server = server
-
-    '''
-        @brief test is client need read data in.
-        @retval False there is no any need.
-        @retval True need read data in.
-    '''
-    def is_need_read(self):
-        # always need read to detect connection close.
-        return True
-
-    '''
-        @brief test is client need write data out.
-        @retval False there is no any need.
-        @retval True need write data out.
-    '''
-    def is_need_write(self):
-        if self.request is None:
-            return False
-
-        if self.request.is_request_ok() is False:
-            return False
-
-        if self.responds is None:
-            return False
-
-        return self.responds.is_need_write()
-
-    '''
-        @brief read data in through connected socket
-        @retval True read procedure complete, need close socket.
-        @retval False read procedure not complete
-    '''
-    def on_read(self):
+    reg = re.compile('(?P<key>\S*)\s*:\s*(?P<value>[^\r\n]*)')
+    nn_index = header_text.index('\n')
+    while True:
         try:
-            data = self.fds.recv(1024)
-        except Exception, e:
-            print e
-            traceback.format_exc()
-            return True
+            base = header_text[nn_index+1:].index('\n')
+            if nn_index < 0:
+                break
+        except ValueError:
+            break
 
-        if data is None or len(data) <= 0:
-            return True
+        key_value_dict_result = reg.match(header_text[nn_index+1:])
+        if key_value_dict_result is None:
+            break
 
-        if self.request is None:
-            self.request = PyHttpRequest()
+        nn_index += base + 1
 
-        return self.request.on_read(data)
+        key_value_dict = key_value_dict_result.groupdict()
+        header_dict[key_value_dict['key']] = key_value_dict['value']
 
-    '''
-        @brief write data out through connected socket
-        @retval True write procedure complete, need close socket.
-        @retval False write procedure not complete
-    '''
-    def on_write(self):
-        if self.request is None:
-            return False
+    return header_dict
 
-        if self.responds is None:
-            # initialize responds object flow request
-            self.responds = PyHttpResponds(self.request)
 
-        data = self.responds.on_write()
-        if data is None:
-            return False
+# 协程化的TCP服务器
+class PyTcpServer(object):
+    def __init__(self, iface, serve_port, peer_callback):
+        self.iface = iface
+        self.serve_port = serve_port
+        self.die = False
+        # 服务纤程句柄
+        self.green_let = None
+        # 连接的句柄
+        self.peer_green_let_list = []
+        # 连接处理句柄
+        self.peer_callback_main = peer_callback
 
-        try:
-            self.fds.send(data)
-        except Exception, e:
-            print e
-            traceback.format_exc()
-            return True
+        self.__startup()
 
-        return False
+    # TCP服务过程
+    def tcp_server_main(self, srv):
+        print 'server running...'
+        while self.die is False:
+            try:
+                peer_conn, peer_addr = srv.accept()
+            except Exception, e:
+                break
 
-    '''
-        @brief event of client destroy will come to here.
-    '''
-    def on_close(self):
+            peer_green_let = gevent.spawn(self.peer_callback_main, peer_conn, peer_addr)
+            self.peer_green_let_list.append(peer_green_let)
+
+        print 'server shutduwn...'
+        srv.close()
+
+    # 启动服务器
+    def __startup(self):
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+        s.bind((self.iface, self.serve_port))
+        s.listen(15)
+        # 获取服务线程的句柄
+        self.green_let = gevent.spawn(self.tcp_server_main, s)
+        print "server startup done @", (self.iface, self.serve_port)
+
+    def shutdown(self):
         pass
 
-    '''
-        @brief you can do client business here
-        @retval business complete, need close socket.
-        @retval False business not complete
-    '''
-    def on_rolling(self):
-        # connection will timeout if no data recieved in 30s.
-        if self.request is None:
-            if time.time() - self.born > 5.0:
-                return True
-            else:
-                return False
+    # 休眠指定的毫秒数
+    @staticmethod
+    def update_idle(sleep_by_ms=None):
+        if sleep_by_ms is None:
+            sleep_by_ms = 50
+        gevent.sleep(sleep_by_ms / 1000.0)
 
-        #if self.responds is None and self.request.is_request_ok() is True:
-        #    self.responds = PyHttpResponds(self.request)
 
-        if self.request.is_request_ok() is True:
-            rule = self.server.match_rules(self)
-            if rule is None and self.responds is None:
-                self.responds = PyHttpErrorResponds(self.request, 404)
-            elif self.responds is None and self.request.is_request_ok() is True:
-                self.responds = PyHttpResponds(self.request)
-            else:
-                pass
-
-            return self.responds.on_rolling()
+# 路径路由对象
+class PathRoute:
+    def __init__(self, path_re, methods):
+        self.path_re = re.compile(path_re)
+        if isinstance(methods, set):
+            self.methods = methods
+        elif isinstance(methods, str):
+            self.methods = [methods]
         else:
-            return False
+            self.methods = {'GET', 'POST'}
+
+        self.callback = None
+
+    def peer_callback(self, callback):
+        self.callback = callback
 
 
-'''
-    @brief PyHttpd class defination
+# 协程化的HTTP服务器
+class PyHttpd(PyTcpServer):
+    def __init__(self, iface, serve_port):
+        super(PyHttpd, self).__init__(iface, serve_port, self.http_peer_main)
+        # 注册的路由表
+        self.route_map = []
 
-    @param server_address server bind address information, default '127.0.0.0'
-    @param server_port server bind port information, default 9999
-'''
-class PyHttpd:
-    def __init__(self, server_address=None, server_port=None):
-        if server_address is None:
-            server_address = '127.0.0.1'
-        if server_port is None:
-            server_port = 9999
-
-        self.server_address = server_address
-        self.server_port = server_port
-
-        # routing rules.
-        self.rules = []
-
-    def match_rules(self, request):
-        return None
-
-    '''
-        @brief routing path
-    '''
-    def route(self, path, methord=None):
-        if methord is None:
-            methord = ['GET']
-
-        rule = PyHttpRule(path, methord)
-        self.rules.append(rule)
-        return rule.on_rolling
-
-    '''
-        @brief start the http server
-    '''
-    def start(self):
-        self.fds = socket.socket()
-        try:
-            self.fds.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.fds.bind((self.server_address, self.server_port))
-        except Exception, e:
-            print e
-            traceback.format_exc()
-
-        self.fds.listen(64)
-        self.clients = []
-        self.route = []
-
-    '''
-        @brief run single step of select call.
-    '''
-    def run_server_step(self, time_to_wait=None):
-        if time_to_wait is None:
-            time_to_wait = 0.5
-        rlist, wlist = [self.fds], []
-
-        for client in self.clients:
-            if client.is_need_read() is True:
-                rlist.append(client.fds)
-            if client.is_need_write() is True:
-                wlist.append(client.fds)
+    # HTTP连接处理过程
+    def http_peer_main(self, conn, addr):
+        print 'new connection from', addr
+        http_request_header, http_request_body = '', ''
 
         try:
-            r, w, _ = select.select(rlist, wlist, [], time_to_wait)
+            rn_rn_index, nn_index = -1, -1
+            while rn_rn_index < 0 and nn_index < 0 and len(http_request_header) < 2000:
+                new_coming = conn.recv(1024)
+                if new_coming is None or len(new_coming) == 0:
+                    break
+
+                http_request_header = http_request_header + new_coming
+
+                try:
+                    rn_rn_index = http_request_header.index('\r\n\r\n')
+                except ValueError:
+                    rn_rn_index = -1
+
+                try:
+                    nn_index = http_request_header.index('\n\n')
+                except ValueError:
+                    nn_index = -1
+
+            # 请求数据中未发现连续的两个换行， 则认为是异常请求
+            if rn_rn_index < 0 and nn_index < 0:
+                print("invalid http request from", addr)
+                conn.close()
+                return
+
+            # 计算请求头部分割点的位置
+            split_index = rn_rn_index + 2 if rn_rn_index > 0 else nn_index + 2
+
+            # 将可能的请求数据体存储到请求数据结构中
+            http_request_body = http_request_header[split_index:]
+            http_request_header = http_request_header[:split_index]
+
+            # 解析本次请求的头部
+            http_query = parser_http_headers(http_request_header)
+            if http_query is None:
+                raise TypeError('invalid http request.')
+
+            http_query['method'] = http_query['method'].upper()
+            request_method = http_query['method']
+            if request_method == 'GET':
+                pass
+            elif request_method == 'POST':
+                print http_query['Content-Type']
+                print http_query['Content-Length']
+            else:
+                print("reqiest method" + request_method + " not supperted")
+                conn.close()
+                return
+
+            print http_query
+
+            server_profile = None
+            www_root = os.getcwd() + '/www'
+            request_file_full_path = www_root + http_query['path']
+
+            self.route_url(conn, addr, http_query, www_root)
         except Exception, e:
-            print e
-            traceback.format_exc()
-            return False
+            print("link losed connection from", addr, e)
+            conn.close()
+            return
 
-        client_closed = []
-        for client in self.clients:
-            connection_closed = False
+        print('process done, connection from', addr)
+        conn.close()
 
-            # do client I/O
-            if client.fds in r:
-                connection_closed = client.on_read()
-            if client.fds in w and connection_closed is False:
-                connection_closed = client.on_write()
+    # 路由处理URL
+    def route_url(self, conn, addr, http_query, www_root):
+        for r in self.route_map:
+            if http_query['method'] not in r.methods:
+                continue
+            if r.path_re.match(http_query['path']) is None:
+                continue
 
-            # do client process
-            if connection_closed is False:
-                connection_closed = client.on_rolling()
+            # 执行回调
+            r.callback(conn, addr, http_query)
 
-            # client will be closed
-            if connection_closed is True:
-                client_closed.append(client)
+            return True
 
-        # remove client from clients list.
-        for client in client_closed:
-            self.clients.remove(client)
-            client.on_close()
-            if client.fds is not None:
-                client.fds.close()
+        return False
 
-        # process new connection
-        if self.fds in r:
-            try:
-                conn, addr = self.fds.accept()
-            except Exception, e:
-                print e
-                traceback.format_exc()
-                return False
+    # 注册路由路径
+    def route(self, *arg, **kwargs):
+        path = arg[0]
+        try:
+            methods = kwargs['methods']
+        except Exception, e:
+            methods = {'GET', 'POST'}
 
-            client = PyHttpClient(self, conn, addr)
-            self.clients.append(client)
+        route = PathRoute(path, methods)
+        self.route_map.append(route)
+        return route.peer_callback
 
-        return True
+
+if __name__ == '__main__':
+    import time
+
+    thttpd = PyHttpd('0.0.0.0', 9999)
+
+    @thttpd.route('/.+', methods={'POST'})
+    def index_html(conn, addr, query):
+        print 'hahaha', addr
+        gevent.sleep(5)
+        print 'doneeeeee', addr
+
+    @thttpd.route('/.+html', methods={'GET'})
+    def index_html(conn, addr, query):
+        print 'hahaha11111'
+
+    while True:
+        thttpd.update_idle()
